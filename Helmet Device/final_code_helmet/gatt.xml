@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+
+<configuration>
+
+    <service uuid="1800">
+      <description>Generic Access Profile</description>
+
+	  <characteristic uuid="2a00" id="c_device_name">
+        <properties read="true" const="true"/>
+        <value>WhistlV1</value>
+      </characteristic>
+
+      <characteristic uuid="2a01">
+        <properties read="true" const="true" />
+        <value type="hex">0000</value>
+      </characteristic>
+    </service>
+
+    <service uuid="180f" advertise="true">
+        <description>Battery</description>
+        <characteristic uuid="2a19" id="c_battery_measurement">
+            <properties read="true" />
+            <value type="user" />
+        </characteristic>
+    </service>
+	
+	<!-- Custom Service -->
+	<service uuid="59D61618-1F71-4B2A-B2D9-1DACDFBA6851" advertise="true">
+    <description>Alert State</description>
+	
+		<!-- custom read/write characteristic for getting/setting I/O port status --> 
+        <characteristic uuid="1EC21C18-643E-418D-99F6-057742F08B87" id="c_alert_status">
+			<description>Alert Status</description>
+            <properties read="true" write="true" notify="true"/>
+            <value length ="1" type="hex" />
+        </characteristic>
+		
+    </service>
+	
+	<service uuid="2cdd2851-c3e8-4fb4-b320-c38c0d94cd9e" advertise="true">
+    <description>Sleep Timer</description>
+	
+		<!-- custom read/write characteristic for getting/setting I/O port status --> 
+        <characteristic uuid="b4c48242-d68a-4190-bdbb-05375d00e24b" id="c_sleep_timer">
+			<description>Sleep Timer</description>
+            <properties read="true" write="true" notify="true"/>
+            <value length="2"  type="hex" />
+        </characteristic>
+		
+    </service>
+</configuration>

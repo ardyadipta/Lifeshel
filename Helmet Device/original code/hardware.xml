@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<hardware>
+    <sleeposc enable="true" ppm="30" />
+    <usb enable="false" />
+    <txpower power="15" bias="5" />
+    <script enable="true" />
+    <slow_clock enable="false" />
+	<pmux regulator_pin="6" />
+	
+	<!--From iBeacon Hardware.xml-->
+	<sleep enable="true" />
+	<wakeup_pin enable="true" port="1" pin="7"/>
+	<timer index="1" enabled_channels="0x14" divisor="0" mode="2" alternate="2" />
+	<port index="0" pull="up" />
+	
+	<usart channel="1" alternate="1" baud="115200" endpoint="none" flow="false" />
+</hardware>

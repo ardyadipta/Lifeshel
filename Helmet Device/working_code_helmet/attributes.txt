@@ -1,0 +1,4 @@
+c_device_name 3
+c_battery_measurement 8
+c_alert_status 11
+c_sleep_timer 16

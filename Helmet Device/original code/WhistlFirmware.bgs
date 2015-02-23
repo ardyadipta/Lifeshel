@@ -1,0 +1,757 @@
+# ================================================================
+# Whistl Firmware Version 1
+# ----------------------------------------------------------------
+#
+# CHANGELOG:
+#   2014-07-18 - 
+#
+# ================================================================
+
+##################################################################################################
+#
+#
+#
+#     Declare Variables
+#
+#
+#
+##################################################################################################
+
+#Variables
+dim bat_pct     			# container for battery measurement percentage
+dim alert_state(1)			# Stores alert_state, controlling yellow/red mode
+dim buzzer_high_pitch		# Flag to alter between low pitch and high pitch for buzzer
+dim sleep_timer	
+dim db_result
+dim db_port
+dim db_data (3)
+dim led_pwm_count
+dim button_1_state
+dim button_2_state
+dim double_click_state 
+dim cap_state
+dim disconnect_from_write_state
+dim disconnect_state
+dim one_count
+dim retry_encrypt_count
+dim single_click_counter_1
+dim single_click_counter_2
+
+#Connection Variables
+dim bond_count
+dim ps_bond_count
+dim temp_result
+dim ps_bond_length
+dim bond_handle
+dim sleep_time_counter
+dim encrypted_flag
+
+dim edge_direction_button_1(4)
+dim edge_direction_button_2(4)
+
+# connection_info structure:
+# - 0: connected/encrypted/bonded flag (bits 0, 1, 2)
+# - 1: disconnection action flags (bit 0 = add to whitelist, bit 1 = resume unfiltered advertising)
+# - 2-7: current or last connected MAC address
+# - 8: current or last connected address type
+dim connection_info(9)
+# temporary buffer used for storing and echoing hex data as ASCII (Returns the right error codes for connecting)
+dim temp_buf(4)
+
+#Constant Definitions
+#GPIO Constants
+
+const HW_PORT_button_1  = 0 	#port 0
+const HW_PIN_button_1 = $02		#pin 1
+const HW_PORT_button_2  = 0 	#port 0
+const HW_PIN_button_2 = $04 	#pin 2
+const HW_PORT_capacitive  = 0 	#port 0
+const HW_PIN_capacitive = $80 	#pin 7
+const HW_PORT_all_buttons  = 0 	#port 0
+const HW_PIN_all_buttons = $86 	#pin 1, 2, 7
+const HW_PORT_pwm_buzzer = 1	#port 1
+const HW_PIN_pwm_buzzer = $01	#pin 0
+const HW_PORT_vbuzzer = 1  		#port 1 
+const HW_PIN_vbuzzer = $04 		#pin 2
+const HW_PORT_pwm_led = 0  		#port 0
+const HW_PIN_pwm_led = $40 		#pin 6
+const HW_PORT_wake = 1			#port 1
+const HW_PIN_wake = $80			#pin 7
+
+#Other Constants
+const ps_bond_storage = $66
+const setting_time = 60			#in seconds, time given to change BLE settings
+const yellow_time = 30 			#in seconds, time given to initialize yellow
+const sleep_time = 5			#in minutes, time given to sleep until wake up
+const sleep_time_multiplyer = 60
+const check_in_time = 30 		#in seconds, time given for wake up after yellow mode initialized
+const red_time = 15				#in seconds, time given to red alarm
+
+#Timer Variables
+const TH_red_on = 1					#Timer handle for turning red on
+const TH_red_off = 2				#Timer handle for turning red off
+const TH_alarm = 3					#Timer handle that controls Buzzer and LED
+const TH_wake = 4					#Timer handle that wakes device from sleep
+const TH_double_click = 5			#Timer handle that resets double_click_state if finished
+const TH_timeout = 7				#Timer handle that increases alert states if timeout occurs
+const TH_alert_states = 8			#Timer handle that triggers alert state actions
+const TH_red_delay = 9				#Timer handle that delays all red mode actions
+const TH_encrypt = 11				#Timer handle that initiates encryption and bonding
+const TH_button_1_state = 12		#Timer handle that changes button_1_state to 0 after a time
+const TH_button_2_state = 13		#Timer handle that changes button_2_state to 0 after a time
+const TH_disconnect_state_reset = 15
+const TH_click_logic = 16			#Timer handle that is in charge of all clicking logic
+const TH_disconnect = 17			#Timer handle that disconnects
+const TH_reset_alert_state = 18		#Timer handle that delays resetting alert state to prevent bugs
+const TH_reset_encrypt_count = 19
+const TH_single_click_state_timeout_1 = 21
+const TH_single_click_state_timeout_2 = 22
+const TH_single_click_state_reset_1 = 23
+const TH_single_click_state_reset_2 = 24
+
+
+##################################################################################################
+#
+#
+#
+#     Start up Logic
+#
+#
+#
+##################################################################################################
+
+event system_boot(major, minor, patch, build, ll_version, protocol, hw)
+	#call system_endpoint_tx(system_endpoint_uart1, 31, "Welcome to Whistl Firmware V1\r\n")
+	#Initiate required variables
+	buzzer_high_pitch = 0
+	led_pwm_count = 0
+	alert_state(0:1) = $01
+	edge_direction_button_1(0:1) =  0 # Rising
+	edge_direction_button_2(0:1) =  0 # Rising
+	button_1_state = 0
+	button_2_state = 0
+	double_click_state = 0
+	disconnect_from_write_state = 0
+	one_count = 0
+	retry_encrypt_count = 0
+	single_click_counter_1 = 0
+	single_click_counter_2 = 0
+	call flash_ps_load($8000 + ps_bond_storage)(temp_result, ps_bond_length, ps_bond_count)
+	
+	#Do initial write to alert state
+	call attributes_write(c_alert_status, 0, 1, alert_state(0:1))	
+	
+	#Interrupt request, edgedir is rising/falling
+	call hardware_io_port_irq_direction(HW_PORT_all_buttons, edge_direction_button_1(0:1))
+	
+	#Turning interrupt feature on. THIS ENABLES SPECIFIC PINS $86 does 1+2+7 pins
+	call hardware_io_port_irq_enable(HW_PORT_all_buttons, HW_PIN_all_buttons)
+	
+	#Pin direction. Needs to be input for interrupt, output for PWM
+	# $85 is for P1_0, P1_2 and P1_7(The wake up pin)
+	call hardware_io_port_config_direction(1, $85)
+	
+	# This is for the LED pin P0_6
+	call hardware_io_port_config_direction(HW_PORT_pwm_led, HW_PIN_pwm_led)
+	
+	#Turn all output pins to low. $84 means P1_2 and P1_7
+	call hardware_io_port_write(1, $84, 0)
+	call hardware_io_port_write(HW_PORT_pwm_led, HW_PIN_pwm_led, 0)
+
+	# Set advertisement interval to 125ms.
+	# Use all three advertisement channels
+	call gap_set_adv_parameters(200, 200, 7)
+	
+	#Turn off buzzer, LED pwm
+	call hardware_set_soft_timer(0,TH_alarm,1)
+	call hardware_timer_comparator(1, 0, 6, 0)
+	call hardware_timer_comparator(1, 4, 6, 0)
+	
+	# enable bondable mode
+    call sm_set_bondable_mode(1)	
+end
+
+##################################################################################################
+#
+#
+#
+#     Input Logic
+#
+#
+#
+##################################################################################################
+
+#Button down event listener
+ event hardware_io_port_status(timestamp, port, irq, state)
+	#Falling edge = High - low
+	#Rising edge = Low - High
+	
+	call hardware_io_port_irq_direction(0, 1)
+	
+	#Button 1 (P0_1) press
+	if (irq & 2) = 2 && (port &0) = 0 then
+		#If button press down
+		button_1_state = 1
+		#Reset Button State to 0 at end
+		call hardware_set_soft_timer(0, TH_button_1_state,1)	
+		call hardware_set_soft_timer(32768/6, TH_button_1_state,1)
+		#Check to see if other button has been pressed within TH_button_1_state time
+		if button_2_state = 1 then
+			#At this point, you are in a double click
+			#Reset single click counters if you get to a double click ever
+			single_click_counter_1 = 0
+			single_click_counter_2 = 0
+			#Increment counter and start countdown to trigger necessary code
+			double_click_state = double_click_state + 1
+			call hardware_set_soft_timer(0, TH_single_click_state_timeout_2,1)
+			call hardware_set_soft_timer(0, TH_click_logic,1)
+			call hardware_set_soft_timer(32768*3/4, TH_click_logic,1)
+			#Reset button states instantly
+			button_2_state = 0
+			button_1_state = 0
+		else
+			#This will happen once per double click, so reset this state in the
+			#TH_double_click_debounce timer if we actually double click
+			############################
+			# single_click_counter_1 = single_click_counter_1 + 1
+			# call hardware_set_soft_timer(0, TH_single_click_state_timeout_1,1)
+			# call hardware_set_soft_timer(32768*3/4, TH_single_click_state_timeout_1,1)
+		end if
+	end if
+	
+	#Button 2 (P0_2) press
+	if (irq & 4) = 4 & (port & 0) = 0 then
+		#If button press down
+		button_2_state = 1
+		#Reset Button State to 0 at end
+		call hardware_set_soft_timer(0, TH_button_2_state,1)
+		call hardware_set_soft_timer(32768/6, TH_button_2_state,1)
+		#Check to see if other button has been pressed within TH_button_2_state time
+		if button_1_state = 1 then
+			#At this point, you are in a double click
+			#Reset single click counters if you get to a double click ever
+			single_click_counter_1 = 0
+			single_click_counter_2 = 0
+			#Increment counter and start countdown to trigger necessary code
+			double_click_state = double_click_state + 1
+			call hardware_set_soft_timer(0, TH_single_click_state_timeout_2,1)
+			call hardware_set_soft_timer(0, TH_click_logic,1)
+			call hardware_set_soft_timer(32768*3/4, TH_click_logic,1)
+			#Reset button states instantly
+			button_2_state = 0
+			button_1_state = 0
+		else
+			#This will happen once per double click, so reset this state in the
+			#TH_double_click_debounce timer if we actually double click
+			############################
+			# single_click_counter_2 = single_click_counter_2 + 1
+			# call hardware_set_soft_timer(0, TH_single_click_state_timeout_2,1)
+			# call hardware_set_soft_timer(32768*3/4, TH_single_click_state_timeout_2,1)
+		end if
+	end if
+end
+
+##################################################################################################
+#
+#
+#
+#     Timer Logic
+#
+#
+#
+##################################################################################################
+
+event hardware_soft_timer(handle)
+ 
+	if handle = TH_single_click_state_timeout_1 then
+		if single_click_counter_1 = 3 then
+			# If not advertising, start, default advertisement interval (~350ms)
+			call gap_set_mode(gap_general_discoverable, gap_undirected_connectable)
+			# Change alert state to silent red
+			alert_state(0:1) = $04
+			call attributes_write(c_alert_status, 0, 1, alert_state(0:1))
+		end if
+		#Reset single_click_counter_1
+		single_click_counter_1 = 0
+	end if
+	
+	if handle = TH_single_click_state_timeout_2 then
+		if single_click_counter_2 = 3 then
+			# If not advertising, start, default advertisement interval (~350ms)
+			call gap_set_mode(gap_general_discoverable, gap_undirected_connectable)
+			# Change alert state to silent red
+			alert_state(0:1) = $04
+			call attributes_write(c_alert_status, 0, 1, alert_state(0:1))
+		end if
+		#Reset single_click_counter_1
+		single_click_counter_2 = 0
+	end if
+	
+	if handle = TH_button_1_state then
+		button_1_state = 0
+	end if
+	
+	if handle = TH_button_2_state then
+		button_2_state = 0
+	end if
+	
+	
+	
+	if handle = TH_click_logic then
+		
+		if double_click_state = 1 then
+			# All yellow mode actions
+			# Change alert state to correct one
+			if ps_bond_count = 0 then
+				alert_state(0:1) = $00
+			else
+				alert_state(0:1) = $01
+			end if
+			call attributes_write(c_alert_status, 0, 1, alert_state(0:1))
+			# start advertising in connectable mode, default advertisement interval (~350ms)
+			call gap_set_mode(gap_general_discoverable, gap_undirected_connectable)
+			#Turn on all yellow mode actions
+			call hardware_set_soft_timer($01,TH_alert_states,1)
+		end if
+		
+		if double_click_state = 2 then
+			# All red mode actions
+			# If not advertising, start, default advertisement interval (~350ms)
+			call gap_set_mode(gap_general_discoverable, gap_undirected_connectable)
+			# Change alert state to red
+			alert_state(0:1) = $03
+			call attributes_write(c_alert_status, 0, 1, alert_state(0:1))
+			# Turn on all red mode actions
+			call hardware_set_soft_timer($01,TH_alert_states,1)
+		end if
+		
+		if double_click_state = 3 then
+			#Reset all timers and alert states
+			call hardware_set_soft_timer(0,TH_wake,1)
+			call hardware_set_soft_timer(0,TH_timeout,1)
+			disconnect_from_write_state = 1
+			call hardware_set_soft_timer(32768/10,TH_disconnect_state_reset, 1)
+			call hardware_set_soft_timer($01,TH_red_off,1)
+			alert_state(0:1) = $00
+			call attributes_write(c_alert_status, 0, 1, alert_state(0:1))
+			call hardware_set_soft_timer($01,TH_alert_states,1)
+		end if
+		
+		double_click_state = 0
+		one_count = 0
+		
+	end if
+	
+	if handle = TH_alert_states then
+		if alert_state(0:1) = $00 then
+			#Write all "Settings + Shutoff" actions
+			#Begin timeout timer: 32768 is crystal speed/sec * 60 sec * 1 min 
+			call hardware_set_soft_timer(0,TH_timeout,1)
+			call hardware_set_soft_timer(32768*setting_time,TH_timeout,1)
+			#call system_endpoint_tx(system_endpoint_uart1, 15, "Alert State 0\r\n")
+		end if
+		
+		if alert_state(0:1) =	 $01 then
+			#Write all "Pre-yellow" actions
+			#Begin timeout timer: 32768 is crystal speed/sec so that means 1 second
+			#call system_endpoint_tx(system_endpoint_uart1, 15, "Alert State 1\r\n")
+			call hardware_set_soft_timer(0,TH_timeout,1)
+			call hardware_set_soft_timer(32768*yellow_time,TH_timeout,1)
+		end if
+		
+		if alert_state(0:1) = $02 then
+			# Write all "Sleep" actions
+			#call system_endpoint_tx(system_endpoint_uart1, 15, "Alert State 2\r\n")
+			
+			sleep_time_counter = 0
+			call hardware_set_soft_timer(0,TH_wake,1)
+			# At the end of timer, wake dis bish up. In future, change time to sleep_timer
+			call hardware_set_soft_timer(32768*sleep_time_multiplyer,TH_wake,0)
+		end if
+		
+		if alert_state(0:1) = $03 then
+			#Write all 'red' mode actions
+			#Start red state
+			call hardware_set_soft_timer($01, TH_red_on,1)
+			#call system_endpoint_tx(system_endpoint_uart1, 15, "Alert State 3\r\n")
+			#Do we want this??? --- NO
+			#When timer expires, shuts off buzzer & LED
+			#call hardware_set_soft_timer(32768*red_time,TH_red_off,1)
+		end if
+		
+		if alert_state(0:1) = $04 then
+			call hardware_set_soft_timer(0,TH_timeout,1)
+		end if
+	end if
+	
+	if handle = TH_red_on then
+		#Turn off continuous 
+		call hardware_set_soft_timer($00,TH_wake,0)
+		#Turn sleep state off so that PWM doesn't get messed up
+		call hardware_io_port_write(HW_PORT_wake, HW_PIN_wake, 255)
+		#Turn on Vbuzzer to allow for PWM noise
+		call hardware_io_port_write(HW_PORT_vbuzzer, HW_PIN_vbuzzer, 255)
+		#Turn PWM for buzzer
+		call hardware_set_soft_timer($1000,TH_alarm,0)
+	end if
+  
+	if handle=TH_red_off then
+		#Turn sleep state back on by lowering wake up pin
+		call hardware_io_port_write(HW_PORT_wake, HW_PIN_wake, 0)
+		#Turn off buzzer, LED pwm
+		call hardware_set_soft_timer(0,TH_alarm,1)
+		call hardware_timer_comparator(1, 0, 6, 0)
+		call hardware_timer_comparator(1, 4, 6, 0)
+		
+		if disconnect_from_write_state != 1 then
+			#Put module to sleep
+			call hardware_set_soft_timer($01, TH_disconnect,1)
+			call hardware_set_soft_timer(0,TH_alert_states,1)
+		end if
+		
+		#Turn off all timers
+		call hardware_set_soft_timer(0,TH_wake,1)
+		call hardware_set_soft_timer(0,TH_timeout,1)
+		#Set alarm pins to correct state
+		call hardware_io_port_write(HW_PORT_vbuzzer, HW_PIN_vbuzzer, 0)
+	end if
+  
+	if handle=TH_alarm then
+		#This loop goes as long as needed switching between high and low frequency PWM	
+		if buzzer_high_pitch = 0 then
+			# channel 0 establishes the baseline frequency (32,000,000 Hz / 10000 = 3.2 kHz)
+			call hardware_timer_comparator(1, 0, 6, 8350)
+			# channel 2 is Buzzer (P1_0) is 50% duty cycle (5000 / 10000 = 0.5)
+			call hardware_timer_comparator(1, 2, 6, 4900)
+			# channel 4 is LED (P0_6) is 50% duty cycle (5000 / 10000 = 0.5)
+			call hardware_timer_comparator(1, 4, 6, 8300)
+			buzzer_high_pitch = 1
+		else if buzzer_high_pitch = 1 then
+				# channel 0 establishes the baseline frequency (32,000,000 Hz / 9000 = 3.55 kHz)
+				call hardware_timer_comparator(1, 0, 6, 8100)
+				# channel 2 is Buzzer (P1_0) is 50% duty cycle (5000 / 10000 = 0.5)
+				call hardware_timer_comparator(1, 2, 6, 4250)
+				buzzer_high_pitch = 0
+				# channel 4 is LED (P0_6) is 50% duty cycle (5000 / 10000 = 0.5)
+				call hardware_timer_comparator(1, 4, 6, 0)
+			end if
+		end if
+	end if 
+  
+	if handle = TH_wake
+		sleep_time_counter = sleep_time_counter + 1
+		if  sleep_time_counter = sleep_time then
+			#Turn off continuous timer
+			call hardware_set_soft_timer($00,TH_wake,0)
+			call gap_set_mode(gap_general_discoverable, gap_undirected_connectable)
+			#call system_endpoint_tx(system_endpoint_uart1, 21, "Started advertising\r\n")
+			
+			if alert_state(0:1) = $02 then
+				#Begin timeout timer: 32768 is crystal speed/sec * 60 sec * 1 min 
+				call hardware_set_soft_timer(32768*check_in_time,TH_timeout,1)
+			end if
+		end if
+	end if
+  
+	if handle = TH_timeout
+		#These actions happen at THE END of the timeout period
+		if alert_state(0:1) = $02 then
+			alert_state(0:1) = $03
+			call attributes_write(c_alert_status, 0, 1, alert_state(0:1))
+			call hardware_set_soft_timer($00,TH_wake,0)
+			call hardware_set_soft_timer($01, TH_alert_states, 1)
+		end if
+		
+		if alert_state(0:1) = $01 then
+			call connection_disconnect(0)
+			call gap_set_mode(gap_non_discoverable, gap_non_connectable)
+			disconnect_state = 1
+			#call system_endpoint_tx(system_endpoint_uart1, 21, "Stopped advertising\r\n")
+			alert_state(0:1) = $02
+			call attributes_write(c_alert_status, 0, 1, alert_state(0:1))
+			call hardware_set_soft_timer($01, TH_alert_states, 1)
+		end if
+		
+		if alert_state(0:1) = $00 then
+			# Put module to sleep
+			call hardware_set_soft_timer($01, TH_disconnect,1)
+			call hardware_set_soft_timer($02, TH_reset_alert_state, 1)
+		end if
+	end if
+	
+	if handle = TH_reset_alert_state then
+		alert_state(0:1) = $01
+		call attributes_write(c_alert_status, 0, 1, alert_state(0:1))
+	end if
+	
+	if handle = TH_encrypt then
+        #call system_endpoint_tx(system_endpoint_uart1, 29, "2. Requesting encryption...\r\n")
+        # other side hasn't tried an encrypted link yet even though we are
+        # bonded as far as we know anyway, so try to start it from this end
+        # ("connection" value here is always 0 since we are a peripheral,
+        # and peripherals only support a single connection at a time)
+        call sm_encrypt_start(0, 1)
+    end if
+
+	if handle = TH_disconnect_state_reset then
+		disconnect_from_write_state = 0
+	end if
+	
+	if handle = TH_disconnect then
+		call connection_disconnect(0)
+		call gap_set_mode(gap_non_discoverable, gap_non_connectable)
+		disconnect_state = 1
+		#call system_endpoint_tx(system_endpoint_uart1, 21, "Stopped advertising\r\n")
+	end if
+	
+	if handle = TH_reset_encrypt_count then
+		retry_encrypt_count = 0
+	end if
+end
+
+##################################################################################################
+#
+#
+#
+#     Bonding and Connection code
+#
+#
+#
+##################################################################################################
+
+event connection_status(connection, flags, address, address_type, conn_interval, timeout, latency, bonding)
+	
+	#call system_endpoint_tx(system_endpoint_uart1, 10, "In event\r\n")
+	# Load bond count from persistent storage
+	call flash_ps_load($8000 + ps_bond_storage)(temp_result, ps_bond_length, ps_bond_count)
+	
+	if ps_bond_count = 0 then
+		# First time a device has bonded. Set this device to be the only bond handle worthy
+		bond_handle = bonding
+	else
+		if bond_handle != bonding then
+			# When a new device connects, it will come here because it doesn't have the same bond handle as bond_handle
+			#call system_endpoint_tx(system_endpoint_uart1, 36, "More than one bond, disconnecting...")
+			#call system_endpoint_tx(system_endpoint_uart1, 2, "\r\n")
+			# Put module to sleep
+			#call hardware_set_soft_timer($01, TH_disconnect,1)
+		end if
+	end if
+
+	#Only enter this if it is a valid connection (if bond_handles match)
+	if bond_handle = bonding then
+		if (flags & $05) = $05 then
+			# connection established
+			#call system_endpoint_tx(system_endpoint_uart1, 10, "Connected ")
+			
+			# display current bond status
+			# if bonding < $ff then
+				# call system_endpoint_tx(system_endpoint_uart1, 18, "(already bonded)\r\n")
+			# else
+				# call system_endpoint_tx(system_endpoint_uart1, 14, "(not bonded)\r\n")
+			# end if
+			
+			# update connection info (connected = true)
+			connection_info(0:1) = connection_info(0:1) | 1
+
+			# clear "disconnection actions" flag so we don't re-use old settings
+			connection_info(1:1) = 0
+
+			# copy address information into placeholders
+			memcpy(connection_info(2), address(0), 6)
+			connection_info(8:1) = address_type
+		end if
+		
+		if (flags & $02) = $02 then
+			
+			# encryption started
+			#call system_endpoint_tx(system_endpoint_uart1, 11, "Encrypted\r\n")
+
+			# update connection info (encrypted = true)
+			connection_info(0:1) = connection_info(0:1) | 2
+			disconnect_state = 0
+			# cancel the pending one-shot encryption timer, if running
+			call hardware_set_soft_timer(0, 1, 1)
+		else
+			# request encryption if not encrypted already
+			if bonding = $ff then
+				# not bonded or encrypted, so request both
+				#call system_endpoint_tx(system_endpoint_uart1, 29, "1. Requesting encryption...\r\n")
+				call sm_encrypt_start(0, 1)
+			else
+				# update connection info (bonded = true)
+				#connection_info(0:1) = connection_info(0:1) | 4
+				
+				# start one-shot encryption attempt timer in case the remote side
+				# doesn't attempt an encrypted link within 1 second (this might
+				# happen if you bond with a smartphone and then remove the pairing
+				# info from the phone side, but not the local module side)
+				#call hardware_set_soft_timer(32768, TH_encrypt, 1)
+			end if
+		end if
+	end if
+end
+
+event sm_bond_status(bond, keysize, mitm, keys)
+    if (connection_info(0:1) & $01) != 0 then
+        # already connected, so that means we just bonded
+		#call system_endpoint_tx(system_endpoint_uart1, 9, "Bonded!\r\n")
+        # update connection status (bonded = true)
+        connection_info(0:1) = connection_info(0:1) | 4
+
+        # increment local and persistent bond count
+        bond_count = bond_count + 1
+		ps_bond_count = ps_bond_count + 1 
+		
+		#save bond count to persistent storage
+		call flash_ps_save($8000 + ps_bond_storage, 1, ps_bond_count)
+		
+        #call system_endpoint_tx(system_endpoint_uart1, 23, "2. Current bond count: ")
+        #call system_endpoint_tx(system_endpoint_uart1, 1, bond_count + $30) # convert to ASCII (always 0-8)
+		#call system_endpoint_tx(system_endpoint_uart1, 15, " ps_bond_count ")
+		#call system_endpoint_tx(system_endpoint_uart1, 3, ps_bond_count + $30)
+		#call system_endpoint_tx(system_endpoint_uart1, 2, "\r\n")
+    end if
+end
+
+event sm_bonding_fail(handle, result)
+    # if bonding fails, handle it gracefully based on the following possible results:
+    # - 0x018B - Out of bonds (no space left, all 8 bonding slots taken)
+    # - 0x0205 - Authentication failure (shouldn't happen with "just works" mode, but might otherwise)
+    # - 0x0206 - Pin or key missing (probably local or remote device is missing the key, but not both)
+    # - 0x0301 - Passkey entry failed (also shouldn't happen in "just works" mode unless bonding is cancelled)
+    # - 0x0302 - OOB data not available (only occurs if OOB is required and not supported on both ends)
+    # - 0x0303 - Authentication requirements (I/O capabilities required but not supported)
+    # - 0x0304 - Confirm value failed (PIN entry/comparison attempted but failed)
+    # - 0x0305 - Pairing not supported (also occurs if bond info removed from remote device but not local module)
+    # - 0x0306 - Encryption key size (key size insufficient to meet security requirements)
+    # - 0x0307 - Command not supported (SMP command is not supported on this device)
+    # - 0x0308 - Unspecified reason (may occur if bond info is present remotely but not locally)
+    # - 0x0309 - Repeated attempts (too little time has elapsed since last pairing/security request)
+    # - 0x030A - Invalid parameters (bad parameters sent during pairing/bonding process)
+   # call system_endpoint_tx(system_endpoint_uart1, 16, "Bonding failed: ")
+    temp_buf(0:1) = ((result >> 12) & $f) + 48 + ((result >> 12) & $f)/10*7
+    temp_buf(1:1) = ((result >> 8) & $f) + 48 + ((result >> 8) & $f)/10*7
+    temp_buf(2:1) = ((result >> 4) & $f) + 48 + ((result >> 4) & $f)/10*7
+    temp_buf(3:1) = (result & $f) + 48 + (result & $f)/10*7
+    #call system_endpoint_tx(system_endpoint_uart1, 4, temp_buf(0:4))
+    #call system_endpoint_tx(system_endpoint_uart1, 2, "\r\n")
+    
+    # NOTE: the most common cases you need to take care of are:
+    # - 0x018B, which means you ran out of space and must remove at least one bond in order to bond again
+    # - 0x0206, which typically means the pairing info was removed on the remote device but not locally
+    # - 0x0301, which typically means the user cancelled the pairing request or entered the wrong passkey
+    # - 0x0305, which is like 0x0206 but is often generated instead if the remote device is a smartphone
+    # - 0x0308, which typically means the pairing info was removed on the local device but not remotely
+    if result = $018b then
+        # only solved by removing bonds
+        #call system_endpoint_tx(system_endpoint_uart1, 33, "Out of bonds, clear bonds first\r\n")
+    end if
+    if result = $0301 then
+        # usually solved simply by trying again
+        #call system_endpoint_tx(system_endpoint_uart1, 33, "Passkey/confirm issue, retry...\r\n")
+		if retry_encrypt_count <2 then
+			call sm_encrypt_start(0, 1)
+			retry_encrypt_count = retry_encrypt_count + 1
+		else
+			call hardware_set_soft_timer(32768*120, TH_reset_encrypt_count,1)
+			call hardware_set_soft_timer($01, TH_disconnect,1)
+		end if	
+    end if
+    if result = $0305 || result = $0206 then
+        # remove local bonding info first, then the remote device needs to reconnect
+        #call system_endpoint_tx(system_endpoint_uart1, 39, "Local bond info issue, remove/disc...\r\n")
+        bond_count = bond_count - 1
+        call flash_ps_erase($8000 + handle)
+        call sm_delete_bonding(handle)
+        # Put module to sleep
+		call hardware_set_soft_timer($01, TH_disconnect,1)
+    end if
+    if result = $0308 then
+        # remove remote bonding info first, then the remote device needs to reconnect
+        #call system_endpoint_tx(system_endpoint_uart1, 38, "Remote bond info issue, remove first\r\n")
+        # Put module to sleep
+		call hardware_set_soft_timer($01, TH_disconnect,1)
+    end if
+end
+
+
+##################################################################################################
+#
+#
+#
+#     Attribute Writing and Reading Code
+#
+#
+#
+##################################################################################################
+
+event attributes_value(connection, reason, handle, offset, value_len, value_data)
+	#Check if writing buzzer State
+	if handle = c_alert_status then
+		call hardware_set_soft_timer(0,TH_wake,1)
+		call hardware_set_soft_timer(0,TH_timeout,1)
+		disconnect_from_write_state = 1
+		call hardware_set_soft_timer(32768/10,TH_disconnect_state_reset, 1)
+		# write alert_state proxy variable
+		alert_state(0:1) = value_data(0:1)
+		if alert_state(0:1) != 3 then
+			call hardware_set_soft_timer($01,TH_red_off,1)
+		end if
+		# Start correct action, given new alert state change
+		call hardware_set_soft_timer($01, TH_alert_states, 1)
+	end if
+end
+
+event attributes_user_read_request(connection, handle, offset, maxsize)
+    
+	if handle = c_alert_status then
+		call attributes_user_read_response(connection, 0, 1, alert_state(0:1))
+	end if
+
+	if handle = c_sleep_timer then
+		#call system_endpoint_tx(system_endpoint_uart1, 15, "Reading sleep\r\n")
+		call attributes_user_read_response(connection, 0, 1, sleep_timer)
+	end if
+	
+	# check for battery characteristic read request
+    if handle = c_battery_measurement then
+        # queue ADC reading (VDD/3 source, 12 effective bits, internal 1.24v reference)
+        call hardware_adc_read(15, 3, 0)
+    end if
+end
+
+
+event hardware_adc_result(input, value)
+    # check for internal AVDD/3 result (battery channel)
+    if input = 15 then
+        # To scale the read value [0, +32767] to the range [0, 100] properly
+        # we have to determine the 0% reading and the 100% reading based on
+        # operating voltages.
+        #
+        # - A "full" battery will read ~4.7v:
+        #   --> (4.7v/4.7v) * (32767/1.24v) = 26425
+        # - An "empty" battery will read ~2.75v (min battery voltage):
+        #   --> (2.75v/4.2) * (32767/1.24v) = 17302
+        
+        # This means we must scale [+17302, +26425] to [0, +100]
+        
+        bat_pct = (value - 17302) * 100 / (26425 - 17302)
+        
+        # NOTE: you can keep the battery at 100% for longer if you DECREASE
+        # the high value (23342 above), and you can make it drop to 0% faster
+        # if you INCREASE the low value (17616 above). You may need to test
+        # to find a good range based on your own battery supply selection.
+        
+        # enforce 0%/100% bounds
+        if bat_pct > 100 then
+            bat_pct = 100
+        end if
+        if bat_pct < 0 then
+            bat_pct = 0
+        end if
+
+        # respond with calculated percent (connection=0, result=0, length=1, data=bat_pct)
+        call attributes_user_read_response(0, 0, 1, bat_pct)
+    end if
+end
