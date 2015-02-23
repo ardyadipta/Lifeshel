@@ -58,6 +58,8 @@ dim connection_info(9)
 # temporary buffer used for storing and echoing hex data as ASCII (Returns the right error codes for connecting)
 dim temp_buf(4)
 
+dim debouncing_time
+
 # Hardware configuration constant
 # INPUT:
 # button A 	P0_1 and P1_2
@@ -82,7 +84,8 @@ const RISING_EDGE			= 0 	# rising edge for configuration
 ######
 
 #timing constant for timer
-const TEN_MS 	= 328				# 10  ms
+const TEN_MS 	= $148				# 10  ms
+const TWENTY_MS = $290				# 20  ms
 const FIFTY_MS 	= 1640				# 50  ms
 const HUNDRED_MS = 3277				# 100 ms
 const ONE_S 	= $8000				# 1 second
@@ -109,7 +112,7 @@ const TH_encrypt = 11				#Timer handle that initiates encryption and bonding
 const TH_disconnect_state_reset = 15
 const TH_disconnect = 17			#Timer handle that disconnects
 const TH_reset_alert_state = 18		#Timer handle that delays resetting alert state to prevent bugs
-const TH_reset_encrypt_count = 19
+const TH_reset_encrypt_count = 19	
 
 
 ##################################################################################################
@@ -123,7 +126,9 @@ const TH_reset_encrypt_count = 19
 ##################################################################################################
 
 event system_boot(major, minor, patch, build, ll_version, protocol, hw)
-	#call system_endpoint_tx(system_endpoint_uart1, 31, "Welcome to Whistl Firmware V1\r\n")
+	# change the debouncing time
+	debouncing_time = TWENTY_MS
+
 	#Initiate required variables
 	emergency_status = 0
 	flash_status = 0
@@ -186,9 +191,9 @@ end
  event hardware_io_port_status(delta, port, irq, state)
 
 	# uncomment these 2 lines for debouncing
-	if (delta-last_press) >= TEN_MS|| (delta < last_press && ($7FFFFFFF - last_press + delta) > TEN_MS) then
+	if (delta-last_press) >= debouncing_time || (delta < last_press && ($7FFFFFFF - last_press + delta) > debouncing_time) then
         last_press = delta
-    ###### debouncing done
+    	###### debouncing done
 
 		if port = 0 then
 			if(irq & EMERGENCY_SWITCH_ON) = EMERGENCY_SWITCH_ON then 
@@ -241,9 +246,6 @@ end
 				#call system_endpoint_tx(system_endpoint_uart1, 14, "P1_2 pressed, LED turned off \r\n")
 				emergency_status = 0
 				call hardware_set_soft_timer(0, TH_alarm,0)
-
-				# if flash is switched on, turn LED on
-
 				
 				# originally taken from triple click state
 				#Reset all timers and alert states
@@ -259,10 +261,8 @@ end
 
 			#state of port 2 read later, since we have to do it in either interrupt case
 		end if
-	
 	# uncomment this for debouncing
 	end if
-
 end
 
 ##################################################################################################
