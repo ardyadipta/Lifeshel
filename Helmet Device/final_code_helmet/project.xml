@@ -4,5 +4,5 @@
     <hardware in="hardware.xml" />    
     <script in="WhistlFirmware.bgs" />
     <image out="out.hex" />
-    <device type="ble113" memory="256" />
+    <device type="ble113" memory="256" /> <!-- 128 for DevKit, 256 for Whistl Board-->
 </project>
